@@ -393,6 +393,7 @@ AnnotationCheck/
 
 阿里云翻译功能需要自行注册阿里云账号，访问 https://mt.console.aliyun.com/basic 可以开通**机翻翻译通用版**，每个主账号每月有一百万字符的免费额度，
 **1,000,000字符约160,000英文单词，使用时请注意额度限制，避免大量计费！！！**
+额度监控请访问：https://mt.console.aliyun.com/monitor
 注册后可以通过 SDK 使用软件内翻译功能。
 
 ### 13.1 首次配置
