@@ -599,6 +599,17 @@ class TextPanel(QWidget):
         if 0 <= row < len(self._lines):
             self.line_edited.emit(row, new_txt)
 
+    def apply_pending_edit(self):
+        """Commit preview edits to ann_mgr if the text has changed. Called by MainWindow before frame navigation."""
+        if self._ann_mgr is None or self._current_frame < 0:
+            return
+        orig_lines = self._ann_mgr.lines
+        if self._current_frame >= len(orig_lines):
+            return
+        new_txt = self._preview.toPlainText().strip()
+        if new_txt != orig_lines[self._current_frame]:
+            self._apply_edit()
+
     def _cancel_edit(self):
         self._update_preview(self._current_frame)
 

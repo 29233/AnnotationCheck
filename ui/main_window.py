@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self.nav_bar.frame_requested.connect(self._go_to_frame)
         self.nav_bar.prev_violation_requested.connect(self._prev_violation)
         self.nav_bar.next_violation_requested.connect(self._next_violation)
+        self.nav_bar.next_modified_requested.connect(self._next_modified)
         self.text_panel.frame_requested.connect(self._go_to_frame)
         self.text_panel.line_edited.connect(self._on_line_edited)
 
@@ -292,6 +293,12 @@ class MainWindow(QMainWindow):
         idx = max(0, min(idx, self.seq_info.frame_count - 1))
         if idx == self._current_frame:
             return
+        # Flush any pending preview edits before navigating
+        self.text_panel.apply_pending_edit()
+        # auto-save before navigation if there are unsaved edits
+        if self.ann_mgr and self.ann_mgr.modified:
+            self.ann_mgr.save_minimal()
+            self._update_status_bar()
         self._current_frame = idx
 
         vis = (self.seq_info.visible_paths[idx]
@@ -345,12 +352,24 @@ class MainWindow(QMainWindow):
         if nxt:
             self._go_to_frame(nxt[0])
 
+    def _next_modified(self):
+        if not self.review:
+            return
+        all_flags = self.review.all_flags()
+        modified_idxs = [i for i, info in all_flags.items() if info.get("type") == "MODIFIED"]
+        nxt = [i for i in modified_idxs if i > self._current_frame]
+        if nxt:
+            self._go_to_frame(nxt[0])
+
     # ═══════════════════════════════════════ editing
     @pyqtSlot(int, str)
     def _on_line_edited(self, idx: int, new_text: str):
         if not self.ann_mgr.lines:
             return
         self.ann_mgr.set_line(idx, new_text)
+        # auto-mark this frame as modified (overwrites any existing flag)
+        if self.review:
+            self.review.add_flag(idx, "MODIFIED", "")
         # revalidate and cache
         self._violations = self.validator.validate_all(self.ann_mgr.lines)
         self._cache_violation_indices(self._violations)

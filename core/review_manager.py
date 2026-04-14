@@ -4,7 +4,7 @@ from datetime import date
 from typing import Optional, Dict, Any
 
 
-FLAG_TYPES = ["HALLUCINATION", "GRAMMAR", "VISUAL", "OTHER"]
+FLAG_TYPES = ["HALLUCINATION", "GRAMMAR", "VISUAL", "OTHER", "MODIFIED"]
 STATUS_PENDING = "pending"
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_DONE = "done"

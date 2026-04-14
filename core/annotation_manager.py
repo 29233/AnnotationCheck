@@ -101,6 +101,17 @@ class AnnotationManager:
         self.save_translations()
         return True
 
+    def save_minimal(self) -> bool:
+        """Save without creating a backup — for auto-save on navigation."""
+        if not self._text_path:
+            return False
+        content = "\n".join(self.lines)
+        with open(self._text_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        self._modified = False
+        self.save_translations()
+        return True
+
     def _create_backup(self, content: str):
         path = Path(self._text_path)
         backup_dir = path.parent / "backup" / path.stem

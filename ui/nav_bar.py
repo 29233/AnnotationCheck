@@ -9,6 +9,7 @@ class NavBar(QWidget):
     frame_requested = pyqtSignal(int)   # 0-based
     prev_violation_requested = pyqtSignal()
     next_violation_requested = pyqtSignal()
+    next_modified_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -27,6 +28,7 @@ class NavBar(QWidget):
 
         self.btn_prev_viol = QPushButton("◀ 上一问题")
         self.btn_next_viol = QPushButton("下一问题 ▶")
+        self.btn_next_mod  = QPushButton("下一修改 ▶")
 
         for btn in (self.btn_first, self.btn_prev, self.btn_next, self.btn_last):
             btn.setFixedWidth(36)
@@ -48,6 +50,7 @@ class NavBar(QWidget):
         row1.addWidget(self.btn_last)
         row1.addStretch()
         row1.addWidget(self.btn_next_viol)
+        row1.addWidget(self.btn_next_mod)
 
         row2 = QHBoxLayout()
         row2.setContentsMargins(4, 0, 4, 2)
@@ -67,6 +70,7 @@ class NavBar(QWidget):
         self.slider.valueChanged.connect(self._slider_moved)
         self.btn_prev_viol.clicked.connect(self.prev_violation_requested)
         self.btn_next_viol.clicked.connect(self.next_violation_requested)
+        self.btn_next_mod.clicked.connect(self.next_modified_requested)
 
     # ── public API ───────────────────────────────────────────────
     def setup(self, total: int):

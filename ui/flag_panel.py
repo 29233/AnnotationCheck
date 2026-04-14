@@ -12,6 +12,7 @@ _TYPE_COLORS = {
     "GRAMMAR":       QColor(220, 140, 30),
     "VISUAL":        QColor(180, 80,  180),
     "OTHER":         QColor(120, 120, 120),
+    "MODIFIED":      QColor(50,  180, 80),
     # auto-detected
     "OVER_LIMIT":    QColor(220, 50,  50),
     "OVER_WARN":     QColor(210, 130, 30),
