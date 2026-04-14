@@ -41,7 +41,7 @@ class SequenceLoader:
 
     # ------------------------------------------------------------------
     def load_sequence(self, seq_name: str) -> SequenceInfo:
-        seq_root = self.visual_root / seq_name / seq_name
+        seq_root = self.visual_root / seq_name
 
         visible_paths = self._img_files(seq_root / "visible")
         infrared_paths = self._img_files(seq_root / "infrared")
