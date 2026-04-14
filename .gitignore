@@ -1,0 +1,24 @@
+# Data files (too large to upload)
+data/
+
+# Build artifacts
+build/
+dist/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# Python
+.env
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with credentials (create a template instead)
+config.json
