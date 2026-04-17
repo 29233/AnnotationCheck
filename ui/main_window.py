@@ -1,13 +1,14 @@
 import os
 from typing import Optional, List
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSlot
+from PyQt5.QtCore import Qt, QTimer, QEvent, pyqtSlot, QThread, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QSplitter, QVBoxLayout,
                               QHBoxLayout, QToolBar, QStatusBar, QAction,
                               QFileDialog, QMessageBox, QShortcut, QLabel,
                               QDockWidget, QMenuBar, QMenu, QLineEdit,
-                              QDialog, QGridLayout, QDialogButtonBox)
+                              QDialog, QGridLayout, QDialogButtonBox,
+                              QButtonGroup, QRadioButton, QProgressBar)
 
 from core.config_manager     import ConfigManager
 from core.sequence_loader    import SequenceLoader, SequenceInfo
@@ -39,6 +40,7 @@ class MainWindow(QMainWindow):
 
         self._current_frame = 0
         self._violations: dict = {}          # cached full validation result
+        self._active_flag_filters: set = set()   # active flag type filters
         self._violation_indices: List[int] = []
         self._viol_cursor = -1
 
@@ -56,6 +58,11 @@ class MainWindow(QMainWindow):
         self._auto_save_timer.timeout.connect(self._auto_save)
         interval = self.config.get("auto_save_interval", 180) * 1000
         self._auto_save_timer.start(interval)
+
+        # Install application-level mouse event filter so side buttons work
+        # even when focus is on child widgets (image/text/table panels).
+        from PyQt5.QtWidgets import QApplication
+        QApplication.instance().installEventFilter(self)
 
         # ── restore last session ──────────────────────────
         last_root = self.config.get("last_data_root", "")
@@ -142,6 +149,8 @@ class MainWindow(QMainWindow):
         flag_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.addDockWidget(Qt.RightDockWidgetArea, flag_dock)
         self.flag_panel.frame_requested.connect(self._go_to_frame)
+        self.flag_panel.filter_changed.connect(self._on_flag_filter_changed)
+        self.flag_panel.bulk_rewrite_requested.connect(self._on_bulk_rewrite)
 
     def _build_statusbar(self):
         self._sb = QStatusBar(self)
@@ -156,6 +165,12 @@ class MainWindow(QMainWindow):
                     self._lbl_viols, self._lbl_flags, self._lbl_saved):
             self._sb.addPermanentWidget(lbl)
             self._sb.addPermanentWidget(QLabel("  |  "))
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFixedWidth(200)
+        self._progress_bar.setMaximum(100)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setVisible(False)
+        self._sb.addPermanentWidget(self._progress_bar)
 
     def _build_shortcuts(self):
         def sc(key, fn):
@@ -174,12 +189,24 @@ class MainWindow(QMainWindow):
         sc("Ctrl+S", self._save)
         sc("Ctrl+Z", self._undo)
         sc("Ctrl+Y", self._redo)
-        sc("Ctrl+F", self.text_panel.focus_search)
+        sc("Ctrl+H", self.text_panel.focus_search)
+        sc("Ctrl+F", self._flag_as_hallucination)
         sc("F",      self._flag_current_frame)
         sc("[",      self._prev_flag)
         sc("]",      self._next_flag)
         sc("Ctrl+[", self._prev_violation)
         sc("Ctrl+]", self._next_violation)
+        sc("Ctrl+R", self._on_bulk_rewrite_shortcut)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress:
+            if event.button() == Qt.XButton1:
+                self._go_to_frame(self._current_frame - 1)
+                return True
+            if event.button() == Qt.XButton2:
+                self._go_to_frame(self._current_frame + 1)
+                return True
+        return super().eventFilter(obj, event)
 
     def _build_menubar(self):
         mb = self.menuBar()
@@ -190,6 +217,10 @@ class MainWindow(QMainWindow):
         sdk_action = QAction("阿里云 SDK 设置…", self)
         sdk_action.triggered.connect(self._show_sdk_config_dialog)
         config_menu.addAction(sdk_action)
+
+        paraphrase_action = QAction("paraphrase 设置…", self)
+        paraphrase_action.triggered.connect(self._show_paraphrase_config_dialog)
+        config_menu.addAction(paraphrase_action)
 
         # ── 帮助 ───────────────────────────────────────────────────────
         help_menu = mb.addMenu("帮助")
@@ -211,7 +242,7 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         QMessageBox.about(self, "关于",
-                          "标注审核工具 v1.0\n\n"
+                          "标注审核工具 v1.1\n\n"
                           "双模态（可见光+红外光）图像序列标注审核工具。")
 
     # ── first-launch check ──────────────────────────────────────────
@@ -273,6 +304,11 @@ class MainWindow(QMainWindow):
         self.nav_bar.setup(self.seq_info.frame_count)
 
         self._current_frame = -1   # force refresh
+
+        # inject HALLUCINATION frame list into flag panel for batch rewrite
+        self.flag_panel.set_pending_hallucination_indices(
+            self.review.get_hallucination_indices())
+
         self._go_to_frame(start_frame)
 
         # sidebar highlight
@@ -335,22 +371,6 @@ class MainWindow(QMainWindow):
         next_list = [i for i in self._violation_indices if i > cur]
         if next_list:
             self._go_to_frame(next_list[0])
-
-    def _prev_flag(self):
-        if not self.review:
-            return
-        idxs = self.review.flagged_indices()
-        prev = [i for i in idxs if i < self._current_frame]
-        if prev:
-            self._go_to_frame(prev[-1])
-
-    def _next_flag(self):
-        if not self.review:
-            return
-        idxs = self.review.flagged_indices()
-        nxt = [i for i in idxs if i > self._current_frame]
-        if nxt:
-            self._go_to_frame(nxt[0])
 
     def _next_modified(self):
         if not self.review:
@@ -484,6 +504,9 @@ class MainWindow(QMainWindow):
     def _refresh_flag_panel(self):
         if not self.review:
             return
+        # Keep flag panel's batch-rewrite queue in sync with latest manual flags.
+        self.flag_panel.set_pending_hallucination_indices(
+            self.review.get_hallucination_indices())
         self.flag_panel.refresh(self.review.all_flags(), self._violations)
 
     def _update_status_bar(self):
@@ -521,7 +544,270 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-# ═══════════════════════════════════════════════════════════ SDK config dialog
+# ═══════════════════════════════════════ filter / navigation
+    def _on_flag_filter_changed(self, filters: set):
+        """收到筛选变化时更新导航过滤集合。"""
+        self._active_flag_filters = filters
+
+    def _get_filtered_flags(self) -> List[int]:
+        """返回当前激活筛选条件下的问题帧列表（升序）。"""
+        if not self.review:
+            return []
+        all_flags = set(self.review.flagged_indices())
+        if not self._active_flag_filters:
+            return sorted(all_flags)
+        filtered = set()
+        for idx in all_flags:
+            flag = self.review.get_flag(idx) or {}
+            if flag.get("type") in self._active_flag_filters:
+                filtered.add(idx)
+        return sorted(filtered)
+
+    def _prev_flag(self):
+        if not self.review:
+            return
+        idxs = self._get_filtered_flags()
+        prev = [i for i in idxs if i < self._current_frame]
+        if prev:
+            self._go_to_frame(prev[-1])
+
+    def _next_flag(self):
+        if not self.review:
+            return
+        idxs = self._get_filtered_flags()
+        nxt = [i for i in idxs if i > self._current_frame]
+        if nxt:
+            self._go_to_frame(nxt[0])
+
+    # ═══════════════════════════════════════ flag as hallucination
+    def _flag_as_hallucination(self):
+        """Ctrl+F：直接将当前帧标记为 HALLUCINATION（无弹窗）。"""
+        if not self.review or not self.seq_info:
+            return
+        idx = self._current_frame
+        existing = self.review.get_flag(idx) or {}
+        if existing.get("type") == "HALLUCINATION":
+            return
+        self.review.add_flag(idx, "HALLUCINATION", "")
+        self._refresh_flag_panel()
+        self._update_status_bar()
+        self._flash_saved("已标记为幻觉")
+
+    # ═══════════════════════════════════════ batch rewrite (background thread)
+    def _on_bulk_rewrite(self, hall_indices: List[int]):
+        """执行批量 paraphrase 改写（由 flag_panel 按钮触发），后台运行。"""
+        if not self.ann_mgr or not self.seq_info or not hall_indices:
+            return
+        model_config = self.config.get_paraphrase_model_config()
+        if not model_config.get("minimax_api_key") and not model_config.get("openai_api_key"):
+            QMessageBox.warning(self, "未配置",
+                               "请先在 配置 → paraphrase 设置 中填写 API 密钥。")
+            return
+
+        # 显示进度条
+        self._progress_bar.setMaximum(len(hall_indices))
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+        self._lbl_saved.setText("正在改写…")
+
+        # 创建后台线程
+        self._rewrite_thread = _RewriteThread(
+            hall_indices=hall_indices,
+            model_config=model_config,
+            ann_lines=self.ann_mgr.lines,
+            review_flags={idx: self.review.get_flag(idx) for idx in hall_indices} if self.review else {},
+            parent_review=self.review,
+        )
+        self._rewrite_thread.progress.connect(self._on_rewrite_progress)
+        self._rewrite_thread.finished.connect(self._on_rewrite_finished)
+        self._rewrite_thread.start()
+
+    def _on_rewrite_progress(self, done: int, total: int, idx: int, para_text: str):
+        """每帧处理完时在主线程更新 UI。"""
+        self.ann_mgr.set_line(idx, para_text)
+        if self.review:
+            self.review.remove_flag(idx)
+            self.review.add_flag(idx, "AI_GENERATED", "")
+        self._progress_bar.setValue(done)
+        self.flag_panel.update_rewrite_progress(done, total)
+
+    def _on_rewrite_finished(self, done: int, total: int, error_msg: str):
+        """后台线程结束后在主线程刷新 UI。"""
+        self._progress_bar.setVisible(False)
+        self.ann_mgr._modified = True
+        self._violations = self.validator.validate_all(self.ann_mgr.lines) if self.ann_mgr else {}
+        self._cache_violation_indices(self._violations)
+        self.text_panel.reload_all(self.ann_mgr.lines, self._violations)
+        self._refresh_flag_panel()
+        self._update_status_bar()
+        if error_msg:
+            QMessageBox.warning(self, "改写出错", error_msg)
+        self._flash_saved(f"批量改写完成（{done}/{total} 帧）")
+
+    # ═══════════════════════════════════════ paraphrase config
+    def _show_paraphrase_config_dialog(self):
+        cfg = self.config.get_paraphrase_model_config()
+        dlg = _ParaphraseConfigDialog(cfg, self)
+        if dlg.exec_() == _ParaphraseConfigDialog.Accepted:
+            self.config.set("paraphrase_model", dlg.model_type)
+            self.config.set("minimax_api_key", dlg.minimax_api_key)
+            self.config.set("openai_base_url", dlg.openai_base_url)
+            self.config.set("openai_api_key", dlg.openai_api_key)
+            self.config.set("openai_model", dlg.openai_model)
+            QMessageBox.information(self, "设置已保存", "paraphrase 配置已保存。")
+
+    def _on_bulk_rewrite_shortcut(self):
+        """Ctrl+R 快捷键：弹出确认框后触发批量改写。"""
+        if not self.review:
+            return
+        hall_indices = self.review.get_hallucination_indices()
+        if not hall_indices:
+            QMessageBox.information(self, "无内容", "当前序列中没有幻觉标记的帧。")
+            return
+        resp = QMessageBox.question(
+            self, "批量改写",
+            f"将对 {len(hall_indices)} 个幻觉帧执行 paraphrase 改写。\n"
+            "改写后 HALLUCINATION 标记将被移除。\n\n是否继续？",
+            QMessageBox.Yes | QMessageBox.No)
+        if resp == QMessageBox.Yes:
+            self._on_bulk_rewrite(hall_indices)
+
+
+class _RewriteThread(QThread):
+    """后台执行批量 paraphrase 的工作线程。"""
+    progress = pyqtSignal(int, int, int, str)   # done, total, idx, para_text
+    finished = pyqtSignal(int, int, str)          # done, total, error_msg
+
+    def __init__(self, hall_indices, model_config, ann_lines, review_flags, parent_review):
+        super().__init__()
+        self.hall_indices = hall_indices
+        self.model_config = model_config
+        self.ann_lines = ann_lines
+        self.review_flags = review_flags
+        self.parent_review = parent_review
+
+    def run(self):
+        from core.paraphrase_model import MiniMaxParaphraseModel, OpenAICompatParaphraseModel
+
+        def find_ref(idx: int):
+            caps = []
+            for candidate in range(idx - 1, -1, -1):
+                if candidate < 0 or candidate >= len(self.ann_lines):
+                    break
+                flag = self.review_flags.get(candidate) if self.review_flags else None
+                ftype = flag.get("type") if flag else None
+                if ftype in ("HALLUCINATION", "AI_GENERATED"):
+                    continue
+                caption = self.ann_lines[candidate]
+                if isinstance(caption, str):
+                    caption = caption.strip()
+                if not caption:
+                    continue
+                caps.append(caption)
+                if len(caps) >= 3:
+                    break
+            return list(reversed(caps))
+
+        try:
+            mt = self.model_config["model_type"]
+            if mt == "openai_compat":
+                model = OpenAICompatParaphraseModel(
+                    base_url=self.model_config.get("openai_base_url", ""),
+                    api_key=self.model_config.get("openai_api_key", ""),
+                    model=self.model_config.get("openai_model", "gpt-4o-mini"),
+                )
+            else:
+                model = MiniMaxParaphraseModel(
+                    api_key=self.model_config.get("minimax_api_key", ""),
+                )
+        except Exception as e:
+            self.finished.emit(0, len(self.hall_indices), str(e))
+            return
+
+        total = len(self.hall_indices)
+        done = 0
+        errors = []
+
+        for idx in self.hall_indices:
+            caps = find_ref(idx)
+            if not caps:
+                print(f"[批量改写] 帧 {idx} 无有效参考文本，跳过")
+                continue
+            results = model.paraphrase(caps, debug_idx=idx)
+            if not results:
+                print(f"[批量改写] 帧 {idx} paraphrase 失败 — 参考: {caps}")
+                errors.append(f"帧 {idx+1} 失败")
+                continue
+            para_text = results[-1]
+            print(f"[批量改写] 帧 {idx} 成功 → {para_text}")
+            done += 1
+            self.progress.emit(done, total, idx, para_text)
+
+        error_msg = "; ".join(errors) if errors else ""
+        self.finished.emit(done, total, error_msg)
+
+
+class _ParaphraseConfigDialog(QDialog):
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("paraphrase 设置")
+        self.model_type = cfg.get("model_type", "minimax")
+        self.minimax_api_key = cfg.get("minimax_api_key", "")
+        self.openai_base_url = cfg.get("openai_base_url", "")
+        self.openai_api_key = cfg.get("openai_api_key", "")
+        self.openai_model = cfg.get("openai_model", "gpt-4o-mini")
+
+        form = QGridLayout(self)
+
+        form.addWidget(QLabel("模型类型："), 0, 0)
+        self._cb_type = QButtonGroup(self)
+        rb_minimax = QRadioButton("MiniMax")
+        rb_openai = QRadioButton("OpenAI 兼容")
+        self._cb_type.addButton(rb_minimax, 0)
+        self._cb_type.addButton(rb_openai, 1)
+        if self.model_type == "minimax":
+            rb_minimax.setChecked(True)
+        else:
+            rb_openai.setChecked(True)
+        type_box = QHBoxLayout()
+        type_box.addWidget(rb_minimax)
+        type_box.addWidget(rb_openai)
+        type_box.addStretch()
+        form.addLayout(type_box, 0, 1)
+
+        form.addWidget(QLabel("MiniMax API Key："), 1, 0)
+        self._le_mx_key = QLineEdit(self.minimax_api_key)
+        self._le_mx_key.setPlaceholderText("API Key")
+        form.addWidget(self._le_mx_key, 1, 1)
+
+        form.addWidget(QLabel("OpenAI Base URL："), 2, 0)
+        self._le_oa_url = QLineEdit(self.openai_base_url)
+        self._le_oa_url.setPlaceholderText("https://api.openai.com/v1")
+        form.addWidget(self._le_oa_url, 2, 1)
+
+        form.addWidget(QLabel("OpenAI API Key："), 3, 0)
+        self._le_oa_key = QLineEdit(self.openai_api_key)
+        form.addWidget(self._le_oa_key, 3, 1)
+
+        form.addWidget(QLabel("OpenAI Model："), 4, 0)
+        self._le_oa_model = QLineEdit(self.openai_model)
+        form.addWidget(self._le_oa_model, 4, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_ok)
+        buttons.rejected.connect(self.reject)
+        form.addWidget(buttons, 5, 0, 1, 2)
+
+    def _on_ok(self):
+        self.model_type = "minimax" if self._cb_type.checkedId() == 0 else "openai_compat"
+        self.minimax_api_key = self._le_mx_key.text().strip()
+        self.openai_base_url = self._le_oa_url.text().strip()
+        self.openai_api_key = self._le_oa_key.text().strip()
+        self.openai_model = self._le_oa_model.text().strip()
+        self.accept()
+
+
 class _SDKConfigDialog(QDialog):
     def __init__(self, ak: str, sk: str, parent=None):
         super().__init__(parent)

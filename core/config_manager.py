@@ -11,6 +11,13 @@ _DEFAULT = {
     "aliyun_ak": "",
     "aliyun_sk": "",
     "sdk_configured": False,
+    # ── paraphrase ──────────────────────────────────────────────
+    "paraphrase_model": "minimax",   # 模型类型：minimax / openai_compat
+    "minimax_api_key": "",
+    "minimax_api_secret": "",
+    "openai_base_url": "",
+    "openai_api_key": "",
+    "openai_model": "gpt-4o-mini",
 }
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config.json"
@@ -53,3 +60,14 @@ class ConfigManager:
     def get_aliyun_credentials(self):
         return (self._data.get("aliyun_ak", ""),
                 self._data.get("aliyun_sk", ""))
+
+    def get_paraphrase_model_config(self) -> dict:
+        """返回当前配置的 paraphrase 模型参数字典。"""
+        return {
+            "model_type": self._data.get("paraphrase_model", "minimax"),
+            "minimax_api_key": self._data.get("minimax_api_key", ""),
+            "minimax_api_secret": self._data.get("minimax_api_secret", ""),
+            "openai_base_url": self._data.get("openai_base_url", ""),
+            "openai_api_key": self._data.get("openai_api_key", ""),
+            "openai_model": self._data.get("openai_model", "gpt-4o-mini"),
+        }

@@ -8,7 +8,7 @@ import threading
 from typing import Dict, List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QColor, QFont, QBrush
+from PyQt5.QtGui import QColor, QFont, QBrush, QTextBlockFormat, QTextCursor
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                               QTableWidget, QTableWidgetItem, QLabel,
                               QTextEdit, QPushButton, QHeaderView,
@@ -119,10 +119,10 @@ class TextPanel(QWidget):
         header_row.addWidget(self._lbl_summary, 1)
 
         # ── English preview pane (top, editable) ───────────────────────
-        self._preview = QTextEdit()
+        self._preview = _WordSnapTextEdit()
         self._preview.setAcceptRichText(False)
         self._preview.setLineWrapMode(QTextEdit.WidgetWidth)
-        self._preview.setFont(QFont("Consolas", 10))
+        self._preview.setFont(QFont("Consolas", 12))
         self._preview.setStyleSheet(_EDIT_STYLE("#333"))
 
         # ── Chinese translation pane (bottom, read-only) ────────────────
@@ -130,7 +130,7 @@ class TextPanel(QWidget):
         self._trans_pane.setReadOnly(True)
         self._trans_pane.setAcceptRichText(False)
         self._trans_pane.setLineWrapMode(QTextEdit.WidgetWidth)
-        self._trans_pane.setFont(QFont("Microsoft YaHei", 10))
+        self._trans_pane.setFont(QFont("Microsoft YaHei", 12))
         self._trans_pane.setStyleSheet(_READONLY_STYLE("#333"))
 
         # ── ctrl row ────────────────────────────────────────────────────
@@ -182,7 +182,7 @@ class TextPanel(QWidget):
         self.table.setWordWrap(False)
         self.table.setShowGrid(False)
         self.table.setAlternatingRowColors(False)
-        self.table.verticalHeader().setDefaultSectionSize(24)
+        self.table.verticalHeader().setDefaultSectionSize(30)
 
         # ── search bar ─────────────────────────────────────────────────
         search_row = QHBoxLayout()
@@ -225,6 +225,9 @@ class TextPanel(QWidget):
         self._search_input.textChanged.connect(self._on_search_changed)
         self._btn_prev_match.clicked.connect(lambda: self._jump_match(-1))
         self._btn_next_match.clicked.connect(lambda: self._jump_match(1))
+
+        self._set_text_line_spacing(self._preview, line_height=1.35)
+        self._set_text_line_spacing(self._trans_pane, line_height=1.35)
 
     # ════════════════════════════════════════════════════════ public API
     def load(self, lines: List[str], violations: Dict[int, List],
@@ -371,6 +374,21 @@ class TextPanel(QWidget):
         self._lbl_summary.setText("  ".join(parts) if parts
                                    else "<font color='#40b040'>✓ 无违规</font>")
 
+    @staticmethod
+    def _set_text_line_spacing(editor: QTextEdit, line_height: float):
+        cursor = editor.textCursor()
+        cursor.select(QTextCursor.Document)
+        fmt = QTextBlockFormat()
+        fmt.setLineHeight(int(line_height * 100), QTextBlockFormat.ProportionalHeight)
+        cursor.mergeBlockFormat(fmt)
+        cursor.clearSelection()
+        editor.setTextCursor(cursor)
+
+    @staticmethod
+    def _normalize_inline_spaces(text: str) -> str:
+        """Collapse consecutive spaces/tabs into one space, preserving newlines."""
+        return re.sub(r"[ \t]{2,}", " ", text)
+
     # ── preview pane ────────────────────────────────────────────────
     def _update_preview(self, idx: int):
         """Update English preview and Chinese translation for the given frame."""
@@ -380,6 +398,7 @@ class TextPanel(QWidget):
         else:
             text = ""
         self._preview.setPlainText(text)
+        self._set_text_line_spacing(self._preview, line_height=1.35)
         self._updating = False
 
         # word count
@@ -414,10 +433,12 @@ class TextPanel(QWidget):
         # show cached translation if available
         if idx in self._trans_cache:
             self._trans_pane.setPlainText(self._trans_cache[idx])
+            self._set_text_line_spacing(self._trans_pane, line_height=1.35)
             self._trans_pane.setStyleSheet(_READONLY_STYLE(border_color))
             self._lbl_trans_status.setText("<font color='#40b040'>✓ 已翻译</font>")
         else:
             self._trans_pane.setPlainText("")
+            self._set_text_line_spacing(self._trans_pane, line_height=1.35)
             self._trans_pane.setStyleSheet(_READONLY_STYLE("#333"))
             self._lbl_trans_status.setText("")
 
@@ -426,6 +447,21 @@ class TextPanel(QWidget):
         if self._updating:
             return
         text = self._preview.toPlainText()
+        normalized = self._normalize_inline_spaces(text)
+        if normalized != text:
+            cur = self._preview.textCursor()
+            old_pos = cur.position()
+            prefix = text[:old_pos]
+            new_pos = len(self._normalize_inline_spaces(prefix))
+
+            self._updating = True
+            self._preview.setPlainText(normalized)
+            self._set_text_line_spacing(self._preview, line_height=1.35)
+            new_cur = self._preview.textCursor()
+            new_cur.setPosition(max(0, min(new_pos, len(normalized))))
+            self._preview.setTextCursor(new_cur)
+            self._updating = False
+            text = normalized
         wc   = len(text.split()) if text.strip() else 0
         self._lbl_wc.setText(f"{wc} 词")
         if wc > 30:
@@ -515,6 +551,7 @@ class TextPanel(QWidget):
         if idx in self._trans_cache:
             border = self._get_border_color(idx)
             self._trans_pane.setPlainText(self._trans_cache[idx])
+            self._set_text_line_spacing(self._trans_pane, line_height=1.35)
             self._trans_pane.setStyleSheet(_READONLY_STYLE(border))
             self._lbl_trans_status.setText("<font color='#40b040'>✓ 已翻译</font>")
 
@@ -679,9 +716,9 @@ def _EDIT_STYLE(border_color: str) -> str:
             border-right: 2px solid #333;
             border-bottom: 2px solid #333;
             border-radius: 4px;
-            padding: 6px;
+            padding: 8px;
             font-family: Consolas;
-            font-size: 10pt;
+            font-size: 12pt;
         }}
     """
 
@@ -696,8 +733,74 @@ def _READONLY_STYLE(border_color: str) -> str:
             border-right: 2px solid #333;
             border-bottom: 2px solid #333;
             border-radius: 4px;
-            padding: 6px;
+            padding: 8px;
             font-family: Microsoft YaHei;
-            font-size: 10pt;
+            font-size: 12pt;
         }}
     """
+
+
+class _WordSnapTextEdit(QTextEdit):
+    """
+    QTextEdit with word-snap drag selection.
+
+    When user drags with left mouse button, the selection start/end are snapped
+    to word boundaries so the highlighted region is word-granular instead of
+    stopping in the middle of a word.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._dragging = False
+        self._anchor_pos = 0
+
+    @staticmethod
+    def _snap_to_word_boundary(text: str, pos: int, forward: bool) -> int:
+        """Snap pos to nearest word boundary in requested direction."""
+        n = len(text)
+        if n == 0:
+            return 0
+        pos = max(0, min(pos, n))
+        if forward:
+            while pos < n and text[pos].isalnum():
+                pos += 1
+            return pos
+        while pos > 0 and text[pos - 1].isalnum():
+            pos -= 1
+        return pos
+
+    def _snap_selection(self, current_pos: int):
+        text = self.toPlainText()
+        if not text:
+            return
+        left = min(self._anchor_pos, current_pos)
+        right = max(self._anchor_pos, current_pos)
+        left = self._snap_to_word_boundary(text, left, forward=False)
+        right = self._snap_to_word_boundary(text, right, forward=True)
+
+        cursor = self.textCursor()
+        cursor.setPosition(left)
+        cursor.setPosition(right, cursor.KeepAnchor)
+        self.setTextCursor(cursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            super().mousePressEvent(event)
+            self._anchor_pos = self.textCursor().position()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and (event.buttons() & Qt.LeftButton):
+            cursor = self.cursorForPosition(event.pos())
+            self._snap_selection(cursor.position())
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            cursor = self.cursorForPosition(event.pos())
+            self._snap_selection(cursor.position())
+            return
+        super().mouseReleaseEvent(event)

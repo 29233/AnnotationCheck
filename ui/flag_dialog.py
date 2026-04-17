@@ -26,9 +26,11 @@ class FlagDialog(QDialog):
             "GRAMMAR":       "语法错误（GRAMMAR）—— 拼写 / 时态 / 冠词错误",
             "VISUAL":        "视觉不准确（VISUAL）—— 目标 / 颜色 / 动作与图像不符",
             "OTHER":         "其他（OTHER）",
+            "MODIFIED":      "已修改（MODIFIED）—— 文本已被手动编辑",
+            "AI_GENERATED":  "AI改写（AI_GENERATED）—— 文本由批量改写生成",
         }
         for i, ftype in enumerate(FLAG_TYPES):
-            rb = QRadioButton(labels[ftype])
+            rb = QRadioButton(labels.get(ftype, f"{ftype}（未配置文案）"))
             rb.setProperty("flag_type", ftype)
             self._btn_group.addButton(rb, i)
             btn_layout.addWidget(rb)

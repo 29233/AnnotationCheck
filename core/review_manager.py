@@ -1,10 +1,10 @@
 import json
 from pathlib import Path
 from datetime import date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 
-FLAG_TYPES = ["HALLUCINATION", "GRAMMAR", "VISUAL", "OTHER", "MODIFIED"]
+FLAG_TYPES = ["HALLUCINATION", "GRAMMAR", "VISUAL", "OTHER", "MODIFIED", "AI_GENERATED"]
 STATUS_PENDING = "pending"
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_DONE = "done"
@@ -47,6 +47,13 @@ class ReviewManager:
 
     def flagged_indices(self):
         return sorted(int(k) for k in self._flags)
+
+    def get_hallucination_indices(self) -> List[int]:
+        """返回所有被标记为 HALLUCINATION 的帧号（按帧号升序）。"""
+        return sorted([
+            int(k) for k, v in self._flags.items()
+            if v.get("type") == "HALLUCINATION"
+        ])
 
     # ------------------------------------------------------------------ progress
     def get_progress(self, seq_name: str) -> Dict:
