@@ -21,6 +21,7 @@ _TYPE_COLORS = {
     "DUPLICATE":     QColor( 50, 100, 200),
     "SIMILAR":       QColor(180, 160, 30),
     "MIXED_LANG":    QColor(140,  50, 180),
+    "NO_TARGET":     QColor(100, 170, 220),
 }
 
 _MANUAL_LABELS = {
@@ -38,6 +39,7 @@ _AUTO_LABELS = {
     "DUPLICATE":   "重复",
     "SIMILAR":     "相似",
     "MIXED_LANG":  "混杂",
+    "NO_TARGET":   "无目标",
 }
 
 
@@ -120,11 +122,13 @@ class FlagPanel(QWidget):
         filter_row3.setContentsMargins(0, 0, 0, 2)
         self._cb_duplicate = QCheckBox("重复")
         self._cb_similar   = QCheckBox("相似")
-        for cb in (self._cb_duplicate, self._cb_similar):
+        self._cb_no_target = QCheckBox("无目标")
+        for cb in (self._cb_duplicate, self._cb_similar, self._cb_no_target):
             cb.setStyleSheet("font-size: 11px;")
             cb.stateChanged.connect(self._on_filter_changed)
         filter_row3.addWidget(self._cb_duplicate)
         filter_row3.addWidget(self._cb_similar)
+        filter_row3.addWidget(self._cb_no_target)
         filter_row3.addStretch()
 
         # ── 问题列表 ──────────────────────────────────────────
@@ -186,6 +190,7 @@ class FlagPanel(QWidget):
         "AI_GENERATED": "_cb_ai",
         "DUPLICATE":    "_cb_duplicate",
         "SIMILAR":      "_cb_similar",
+        "NO_TARGET":    "_cb_no_target",
         "error":        "_cb_errors",
         "warning":      "_cb_warnings",
     }

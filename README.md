@@ -554,6 +554,8 @@ paraphrase 相关配置保存在 `config.json`（程序根目录）：
 3. 线程内按帧处理：
    - 从当前帧向前回溯，提取最多 5 条“非幻觉、非 AI 生成”的参考 caption；
    - 额外收集前 5 帧（任意类型）的非空标注，作为差异化约束邻居集；
+   - 若某帧 caption 包含 `No visible target in current frame`（大小写不敏感），该帧会被标记为运行时自动类型 `NO_TARGET`；
+   - `NO_TARGET` 帧不会参与改写候选，也不会作为参考或邻居约束文本（该类型仅运行时存在，不写入 review 文件）；
    - 调用 `core/paraphrase_model.py` 的模型实现执行 paraphrase；
    - 请求使用 Anthropic 兼容接口，返回后自动提取 `text` content block；
    - 若与邻居集任一文本相似度 `>= 0.85`，触发自动重试（最多 3 次）。

@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QSplitter, QVBoxLayout,
 from core.config_manager     import ConfigManager
 from core.sequence_loader    import SequenceLoader, SequenceInfo
 from core.annotation_manager import AnnotationManager
-from core.annotation_validator import AnnotationValidator
+from core.annotation_validator import AnnotationValidator, Violation
 from core.review_manager     import ReviewManager, STATUS_IN_PROGRESS, STATUS_DONE
 
 from ui.image_panel    import ImagePanel
@@ -26,6 +26,7 @@ from ui.flag_dialog    import FlagDialog
 
 
 class MainWindow(QMainWindow):
+    _NO_TARGET_PHRASE = "no visible target in current frame"
     def __init__(self):
         super().__init__()
         self.setWindowTitle("标注审核工具")
@@ -501,12 +502,37 @@ class MainWindow(QMainWindow):
     def _cache_violation_indices(self, violations: dict):
         self._violation_indices = sorted(violations.keys())
 
+    @classmethod
+    def _is_no_target_caption(cls, text: str) -> bool:
+        if not isinstance(text, str):
+            return False
+        return cls._NO_TARGET_PHRASE in text.strip().lower()
+
+    def _build_display_violations(self) -> dict:
+        """
+        运行时扩展自动违规：NO_TARGET（不持久化，仅用于展示与流程过滤）。
+        """
+        merged = {idx: list(viols) for idx, viols in self._violations.items()}
+        for idx, text in enumerate(self.ann_mgr.lines):
+            if not self._is_no_target_caption(text):
+                continue
+            viols = merged.setdefault(idx, [])
+            if not any(v.vtype == "NO_TARGET" for v in viols):
+                viols.append(Violation(
+                    frame_idx=idx,
+                    vtype="NO_TARGET",
+                    severity="warning",
+                    detail="No visible target in current frame",
+                ))
+        return merged
+
     def _refresh_flag_panel(self):
         if not self.review:
             return
+        display_violations = self._build_display_violations()
         # Keep batch-rewrite queue in sync: hallucination + duplicate/similar violations.
         self.flag_panel.set_pending_rewrite_indices(self._get_bulk_rewrite_indices())
-        self.flag_panel.refresh(self.review.all_flags(), self._violations)
+        self.flag_panel.refresh(self.review.all_flags(), display_violations)
 
     def _get_bulk_rewrite_indices(self) -> List[int]:
         """
@@ -520,6 +546,11 @@ class MainWindow(QMainWindow):
         for idx, viols in self._violations.items():
             if any(v.vtype in ("DUPLICATE", "SIMILAR") for v in viols):
                 candidates.add(idx)
+        candidates = {
+            idx for idx in candidates
+            if 0 <= idx < len(self.ann_mgr.lines)
+            and not self._is_no_target_caption(self.ann_mgr.lines[idx])
+        }
         return sorted(candidates)
 
     def _update_status_bar(self):
@@ -701,6 +732,12 @@ class _RewriteThread(QThread):
 
     def run(self):
         from core.paraphrase_model import MiniMaxParaphraseModel, OpenAICompatParaphraseModel
+        no_target_phrase = "no visible target in current frame"
+
+        def is_no_target_caption(text: str) -> bool:
+            if not isinstance(text, str):
+                return False
+            return no_target_phrase in text.strip().lower()
 
         def find_ref(idx: int):
             caps = []
@@ -715,6 +752,8 @@ class _RewriteThread(QThread):
                 if isinstance(caption, str):
                     caption = caption.strip()
                 if not caption:
+                    continue
+                if is_no_target_caption(caption):
                     continue
                 caps.append(caption)
                 if len(caps) >= 5:
@@ -732,6 +771,8 @@ class _RewriteThread(QThread):
                     continue
                 caption = caption.strip()
                 if not caption:
+                    continue
+                if is_no_target_caption(caption):
                     continue
                 neighbours.append(caption)
             return neighbours
@@ -757,6 +798,10 @@ class _RewriteThread(QThread):
         errors = []
 
         for idx in self.hall_indices:
+            if 0 <= idx < len(self.ann_lines):
+                if is_no_target_caption(self.ann_lines[idx]):
+                    print(f"[批量改写] 帧 {idx} 命中 NO_TARGET 过滤，跳过")
+                    continue
             caps = find_ref(idx)
             if not caps:
                 print(f"[批量改写] 帧 {idx} 无有效参考文本，跳过")
