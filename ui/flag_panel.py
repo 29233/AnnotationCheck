@@ -49,7 +49,7 @@ class FlagPanel(QWidget):
     -------
     frame_requested(int)          – 双击某条跳转到对应帧
     filter_changed(set)           – 筛选条件变化时发出（激活的类型名集合）
-    bulk_rewrite_requested(list) – 用户请求批量改写（发出 HALLUCINATION 帧号列表）
+    bulk_rewrite_requested(list) – 用户请求批量改写（发出候选帧号列表）
     """
 
     frame_requested        = pyqtSignal(int)
@@ -63,7 +63,7 @@ class FlagPanel(QWidget):
         self._manual: Dict[int, Dict] = {}
         self._auto:   Dict[int, List[Violation]] = {}
         self._active_filters: Set[str] = set()
-        self._pending_hall: List[int] = []  # 待改写的幻觉帧（由主窗口注入）
+        self._pending_rewrite: List[int] = []  # 待改写帧（由主窗口注入）
 
         # ── 标题行 ─────────────────────────────────────────────
         title_row = QHBoxLayout()
@@ -115,9 +115,17 @@ class FlagPanel(QWidget):
         self._btn_reset.clicked.connect(self._reset_filters)
         filter_row2.addWidget(self._btn_reset)
 
-        # 第三行：空，留作间距
+        # 第三行：自动检测类型细分
         filter_row3 = QHBoxLayout()
         filter_row3.setContentsMargins(0, 0, 0, 2)
+        self._cb_duplicate = QCheckBox("重复")
+        self._cb_similar   = QCheckBox("相似")
+        for cb in (self._cb_duplicate, self._cb_similar):
+            cb.setStyleSheet("font-size: 11px;")
+            cb.stateChanged.connect(self._on_filter_changed)
+        filter_row3.addWidget(self._cb_duplicate)
+        filter_row3.addWidget(self._cb_similar)
+        filter_row3.addStretch()
 
         # ── 问题列表 ──────────────────────────────────────────
         self._list = QListWidget()
@@ -155,9 +163,9 @@ class FlagPanel(QWidget):
         self._auto   = auto_violations
         self._rebuild()
 
-    def set_pending_hallucination_indices(self, hall_indices: List[int]):
-        """由主窗口注入当前序列的 HALLUCINATION 帧号列表（用于批量改写）。"""
-        self._pending_hall = hall_indices
+    def set_pending_rewrite_indices(self, indices: List[int]):
+        """由主窗口注入当前序列的批量改写候选帧号列表。"""
+        self._pending_rewrite = sorted(set(indices))
 
     def update_rewrite_progress(self, done: int, total: int):
         """由主窗口调用，实时更新批量改写进度标签。"""
@@ -176,6 +184,8 @@ class FlagPanel(QWidget):
         "OTHER":        "_cb_other",
         "MODIFIED":     "_cb_modified",
         "AI_GENERATED": "_cb_ai",
+        "DUPLICATE":    "_cb_duplicate",
+        "SIMILAR":      "_cb_similar",
         "error":        "_cb_errors",
         "warning":      "_cb_warnings",
     }
@@ -273,12 +283,12 @@ class FlagPanel(QWidget):
             self.frame_requested.emit(int(idx))
 
     def _request_bulk_rewrite(self):
-        if not self._pending_hall:
+        if not self._pending_rewrite:
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.information(self, "无内容",
-                                   "当前序列中没有幻觉标记的帧。")
+                                   "当前序列中没有可批量改写的帧（幻觉/重复/相似）。")
             return
-        self.bulk_rewrite_requested.emit(list(self._pending_hall))
+        self.bulk_rewrite_requested.emit(list(self._pending_rewrite))
 
     def _export(self):
         from PyQt5.QtWidgets import QFileDialog, QMessageBox

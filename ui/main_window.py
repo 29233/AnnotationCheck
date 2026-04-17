@@ -1,4 +1,5 @@
 import os
+import difflib
 from typing import Optional, List
 
 from PyQt5.QtCore import Qt, QTimer, QEvent, pyqtSlot, QThread, pyqtSignal
@@ -305,9 +306,8 @@ class MainWindow(QMainWindow):
 
         self._current_frame = -1   # force refresh
 
-        # inject HALLUCINATION frame list into flag panel for batch rewrite
-        self.flag_panel.set_pending_hallucination_indices(
-            self.review.get_hallucination_indices())
+        # inject initial rewrite candidates into flag panel
+        self.flag_panel.set_pending_rewrite_indices(self._get_bulk_rewrite_indices())
 
         self._go_to_frame(start_frame)
 
@@ -504,10 +504,23 @@ class MainWindow(QMainWindow):
     def _refresh_flag_panel(self):
         if not self.review:
             return
-        # Keep flag panel's batch-rewrite queue in sync with latest manual flags.
-        self.flag_panel.set_pending_hallucination_indices(
-            self.review.get_hallucination_indices())
+        # Keep batch-rewrite queue in sync: hallucination + duplicate/similar violations.
+        self.flag_panel.set_pending_rewrite_indices(self._get_bulk_rewrite_indices())
         self.flag_panel.refresh(self.review.all_flags(), self._violations)
+
+    def _get_bulk_rewrite_indices(self) -> List[int]:
+        """
+        批量改写候选：
+        1) 手动标记为 HALLUCINATION 的帧
+        2) 自动违规类型为 DUPLICATE / SIMILAR 的帧
+        """
+        candidates = set()
+        if self.review:
+            candidates.update(self.review.get_hallucination_indices())
+        for idx, viols in self._violations.items():
+            if any(v.vtype in ("DUPLICATE", "SIMILAR") for v in viols):
+                candidates.add(idx)
+        return sorted(candidates)
 
     def _update_status_bar(self):
         if not self.seq_info:
@@ -660,17 +673,17 @@ class MainWindow(QMainWindow):
         """Ctrl+R 快捷键：弹出确认框后触发批量改写。"""
         if not self.review:
             return
-        hall_indices = self.review.get_hallucination_indices()
-        if not hall_indices:
-            QMessageBox.information(self, "无内容", "当前序列中没有幻觉标记的帧。")
+        rewrite_indices = self._get_bulk_rewrite_indices()
+        if not rewrite_indices:
+            QMessageBox.information(self, "无内容", "当前序列中没有可批量改写的帧（幻觉/重复/相似）。")
             return
         resp = QMessageBox.question(
             self, "批量改写",
-            f"将对 {len(hall_indices)} 个幻觉帧执行 paraphrase 改写。\n"
-            "改写后 HALLUCINATION 标记将被移除。\n\n是否继续？",
+            f"将对 {len(rewrite_indices)} 个候选帧执行 paraphrase 改写（幻觉/重复/相似）。\n"
+            "其中幻觉帧改写后 HALLUCINATION 标记将被移除。\n\n是否继续？",
             QMessageBox.Yes | QMessageBox.No)
         if resp == QMessageBox.Yes:
-            self._on_bulk_rewrite(hall_indices)
+            self._on_bulk_rewrite(rewrite_indices)
 
 
 class _RewriteThread(QThread):
@@ -704,9 +717,24 @@ class _RewriteThread(QThread):
                 if not caption:
                     continue
                 caps.append(caption)
-                if len(caps) >= 3:
+                if len(caps) >= 5:
                     break
             return list(reversed(caps))
+
+        def find_neighbour_texts(idx: int):
+            neighbours = []
+            start = max(0, idx - 5)
+            for candidate in range(start, idx):
+                if candidate < 0 or candidate >= len(self.ann_lines):
+                    continue
+                caption = self.ann_lines[candidate]
+                if not isinstance(caption, str):
+                    continue
+                caption = caption.strip()
+                if not caption:
+                    continue
+                neighbours.append(caption)
+            return neighbours
 
         try:
             mt = self.model_config["model_type"]
@@ -733,12 +761,25 @@ class _RewriteThread(QThread):
             if not caps:
                 print(f"[批量改写] 帧 {idx} 无有效参考文本，跳过")
                 continue
-            results = model.paraphrase(caps, debug_idx=idx)
+            neighbour_texts = find_neighbour_texts(idx)
+            results = model.paraphrase(
+                caps,
+                debug_idx=idx,
+                neighbor_texts=neighbour_texts,
+                diversity_threshold=0.85,
+                max_retries=3,
+            )
             if not results:
                 print(f"[批量改写] 帧 {idx} paraphrase 失败 — 参考: {caps}")
                 errors.append(f"帧 {idx+1} 失败")
                 continue
             para_text = results[-1]
+            if neighbour_texts:
+                sim = max(
+                    difflib.SequenceMatcher(None, para_text, nb).ratio()
+                    for nb in neighbour_texts
+                )
+                print(f"[批量改写] 帧 {idx} 与前5帧最大相似度: {sim:.3f}")
             print(f"[批量改写] 帧 {idx} 成功 → {para_text}")
             done += 1
             self.progress.emit(done, total, idx, para_text)

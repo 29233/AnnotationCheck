@@ -16,8 +16,9 @@ Paraphrase Model — 解耦的 AI paraphrase 接口层
 """
 
 import re
+import difflib
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -58,24 +59,57 @@ class AbstractParaphraseModel(ABC):
         "that is not already present in any of the reference captions.\n"
         "3. Keep the description factual and grounded in the image — "
         "do NOT add actions, attributes, or details not supported by the references.\n"
-        "4. The input contains 1–3 reference captions from the same video sequence. "
+        "4. The input contains 1–5 reference captions from the same video sequence. "
         "Integrate their information into ONE coherent paraphrase, keeping the same subject and tense.\n"
         "5. Length constraint is mandatory: the paraphrase MUST NOT exceed 30 words under any circumstance.\n"
-        "6. Prefer concise output: target 20 words or fewer whenever possible without losing key meaning."
+        "6. Prefer concise output: target 20 words or fewer whenever possible without losing key meaning.\n"
+        "7. The paraphrase should be clearly different in wording from nearby frame captions."
     )
 
     @abstractmethod
-    def paraphrase(self, captions: List[str]) -> List[str]:
+    def paraphrase(
+        self,
+        captions: List[str],
+        debug_idx: int = None,
+        neighbor_texts: Optional[List[str]] = None,
+        diversity_threshold: float = 0.85,
+        max_retries: int = 3,
+    ) -> List[str]:
         """
         对输入的 caption 列表进行 paraphrase。
 
         参数：
-            captions: 1~3 帧原文标注（按帧顺序）
+            captions: 1~5 帧原文标注（按帧顺序）
         返回：
             paraphrased: 改写后的 caption 列表（与输入顺序一一对应）
             若 API 调用失败或超时应返回空列表 []
         """
         ...
+
+    @staticmethod
+    def _parse_response(content: str) -> List[str]:
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        lines = [l.strip() for l in content.split("\n") if l.strip()]
+        return [lines[0]] if lines else []
+
+    @staticmethod
+    def _max_similarity(text: str, neighbours: Optional[List[str]]) -> float:
+        if not text or not neighbours:
+            return 0.0
+        scores = [
+            difflib.SequenceMatcher(None, text, nb).ratio()
+            for nb in neighbours if isinstance(nb, str) and nb.strip()
+        ]
+        return max(scores) if scores else 0.0
+
+    @staticmethod
+    def _build_user_prompt(captions: List[str], feedback: str = "") -> str:
+        user_content = "Please generate one paraphrase based on the following reference captions:\n\n"
+        for i, cap in enumerate(captions, 1):
+            user_content += f"[Reference {i}]: {cap}\n"
+        if feedback:
+            user_content += f"\nAdditional constraint:\n{feedback}\n"
+        return user_content
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -99,49 +133,65 @@ class MiniMaxParaphraseModel(AbstractParaphraseModel):
         self.model = model
         self.timeout = timeout
 
-    def paraphrase(self, captions: List[str], debug_idx: int = None) -> List[str]:
+    def paraphrase(
+        self,
+        captions: List[str],
+        debug_idx: int = None,
+        neighbor_texts: Optional[List[str]] = None,
+        diversity_threshold: float = 0.85,
+        max_retries: int = 3,
+    ) -> List[str]:
         if not captions:
             return []
         assert self.api_key, "MiniMax API Key 未设置"
 
         import anthropic
 
-        user_content = "Please generate one paraphrase based on the following reference captions:\n\n"
-        for i, cap in enumerate(captions, 1):
-            user_content += f"[Reference {i}]: {cap}\n"
-
         try:
             client = anthropic.Anthropic(
                 base_url="https://api.minimaxi.com/anthropic",
                 api_key=self.api_key,
             )
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=1024,
-                temperature=1.0,
-                system=self.SYSTEM_PROMPT,
-                messages=[
-                    {"role": "user", "content": user_content}
-                ],
-            )
-            # 收集所有 text 类型的 content block（跳过 thinking block）
-            text_parts = []
-            for block in response.content:
-                if block.type == "text":
-                    text_parts.append(block.text)
-            if not text_parts:
-                print(f"[MiniMax paraphrase] 帧 {debug_idx} — 无 text 块: {response.content}")
-                return []
-            full_text = "\n".join(text_parts).strip()
-            return self._parse_response(full_text)
+            feedback = ""
+            attempts = max(1, max_retries)
+            for attempt in range(1, attempts + 1):
+                response = client.messages.create(
+                    model=self.model,
+                    max_tokens=1024,
+                    temperature=1.0,
+                    system=self.SYSTEM_PROMPT,
+                    messages=[
+                        {"role": "user", "content": self._build_user_prompt(captions, feedback)}
+                    ],
+                )
+                text_parts = []
+                for block in response.content:
+                    if block.type == "text":
+                        text_parts.append(block.text)
+                if not text_parts:
+                    print(f"[MiniMax paraphrase] 帧 {debug_idx} — 无 text 块: {response.content}")
+                    continue
+                full_text = "\n".join(text_parts).strip()
+                parsed = self._parse_response(full_text)
+                if not parsed:
+                    continue
+                candidate = parsed[0]
+                max_sim = self._max_similarity(candidate, neighbor_texts)
+                if max_sim < diversity_threshold:
+                    return parsed
+                feedback = (
+                    f"Your previous output was too similar to nearby captions "
+                    f"(max similarity {max_sim:.2f}, required < {diversity_threshold:.2f}). "
+                    "Rewrite with clearly different wording while preserving meaning."
+                )
+                print(
+                    f"[MiniMax paraphrase] 帧 {debug_idx} 重试 {attempt}/{attempts} "
+                    f"— 相似度 {max_sim:.3f} 超阈值 {diversity_threshold:.2f}"
+                )
+            return []
         except Exception as e:
             print(f"[MiniMax paraphrase] 帧 {debug_idx} 异常: {type(e).__name__}: {e}")
             return []
-
-    def _parse_response(self, content: str) -> List[str]:
-        """解析返回内容。返回第一行（一句 paraphrase）。"""
-        lines = [l.strip() for l in content.split("\n") if l.strip()]
-        return [lines[0]] if lines else []
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -184,17 +234,20 @@ class OpenAICompatParaphraseModel(AbstractParaphraseModel):
                     text_parts.append(txt.strip())
         return "\n".join(text_parts).strip()
 
-    def paraphrase(self, captions: List[str], debug_idx: int = None) -> List[str]:
+    def paraphrase(
+        self,
+        captions: List[str],
+        debug_idx: int = None,
+        neighbor_texts: Optional[List[str]] = None,
+        diversity_threshold: float = 0.85,
+        max_retries: int = 3,
+    ) -> List[str]:
         if not captions:
             return []
         assert self.base_url, "Anthropic base_url 未设置"
         assert self.api_key, "Anthropic API Key 未设置"
 
         import anthropic
-
-        user_content = "Please generate one paraphrase based on the following reference captions:\n\n"
-        for i, cap in enumerate(captions, 1):
-            user_content += f"[Reference {i}]: {cap}\n"
 
         try:
             # 如果用户配置了 /v1 之类路径，自动规整到 Anthropic 兼容端点
@@ -209,29 +262,39 @@ class OpenAICompatParaphraseModel(AbstractParaphraseModel):
                 api_key=self.api_key,
                 timeout=self.timeout,
             )
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=1024,
-                temperature=1.0,
-                system=self.SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_content}],
-            )
+            feedback = ""
+            attempts = max(1, max_retries)
+            for attempt in range(1, attempts + 1):
+                response = client.messages.create(
+                    model=self.model,
+                    max_tokens=1024,
+                    temperature=1.0,
+                    system=self.SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": self._build_user_prompt(captions, feedback)}],
+                )
 
-            content = self._collect_text_blocks(response.content)
-            if not content:
-                print(f"[Anthropic paraphrase] 帧 {debug_idx} — 无可解析 text 块: {response.content}")
-                return []
-            return self._parse_response(content)
+                content = self._collect_text_blocks(response.content)
+                if not content:
+                    print(f"[Anthropic paraphrase] 帧 {debug_idx} — 无可解析 text 块: {response.content}")
+                    continue
+                parsed = self._parse_response(content)
+                if not parsed:
+                    continue
+                candidate = parsed[0]
+                max_sim = self._max_similarity(candidate, neighbor_texts)
+                if max_sim < diversity_threshold:
+                    return parsed
+                feedback = (
+                    f"Your previous output was too similar to nearby captions "
+                    f"(max similarity {max_sim:.2f}, required < {diversity_threshold:.2f}). "
+                    "Rewrite with clearly different wording while preserving meaning."
+                )
+                print(
+                    f"[Anthropic paraphrase] 帧 {debug_idx} 重试 {attempt}/{attempts} "
+                    f"— 相似度 {max_sim:.3f} 超阈值 {diversity_threshold:.2f}"
+                )
+            return []
         except Exception as e:
             print(f"[Anthropic paraphrase] 帧 {debug_idx} 异常: {type(e).__name__}: {e}")
             return []
-
-    def _parse_response(self, content: str) -> List[str]:
-        """
-        解析 Anthropic 兼容接口返回内容。
-        自动去除 <think>...</think> 思考片段，并返回首条有效改写结果。
-        """
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-        lines = [l.strip() for l in content.split("\n") if l.strip()]
-        return [lines[0]] if lines else []
     
