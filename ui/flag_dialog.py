@@ -28,6 +28,7 @@ class FlagDialog(QDialog):
             "OTHER":         "其他（OTHER）",
             "MODIFIED":      "已修改（MODIFIED）—— 文本已被手动编辑",
             "AI_GENERATED":  "AI改写（AI_GENERATED）—— 文本由批量改写生成",
+            "ATTRIBUTE_ERROR": "属性错误（ATTRIBUTE_ERROR）—— 属性描述与图像不符",
         }
         for i, ftype in enumerate(FLAG_TYPES):
             rb = QRadioButton(labels.get(ftype, f"{ftype}（未配置文案）"))

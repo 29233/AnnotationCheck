@@ -18,6 +18,8 @@ _DEFAULT = {
     "openai_base_url": "",
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",
+    # ── attribute properties ────────────────────────────────────
+    "attribute_properties": {},   # {key: value, ...} 目标属性键值对
 }
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config.json"
@@ -71,3 +73,11 @@ class ConfigManager:
             "openai_api_key": self._data.get("openai_api_key", ""),
             "openai_model": self._data.get("openai_model", "gpt-4o-mini"),
         }
+
+    def get_attribute_properties(self) -> dict:
+        """返回目标属性键值对字典，如 {'clothing': 'white top and black shorts', 'top_color': 'white'}"""
+        return self._data.get("attribute_properties", {})
+
+    def set_attribute_properties(self, props: dict):
+        self._data["attribute_properties"] = props
+        self.save()

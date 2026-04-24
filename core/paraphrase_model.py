@@ -74,6 +74,7 @@ class AbstractParaphraseModel(ABC):
         neighbor_texts: Optional[List[str]] = None,
         diversity_threshold: float = 0.85,
         max_retries: int = 3,
+        extra_constraint: str = "",
     ) -> List[str]:
         """
         对输入的 caption 列表进行 paraphrase。
@@ -140,6 +141,7 @@ class MiniMaxParaphraseModel(AbstractParaphraseModel):
         neighbor_texts: Optional[List[str]] = None,
         diversity_threshold: float = 0.85,
         max_retries: int = 3,
+        extra_constraint: str = "",
     ) -> List[str]:
         if not captions:
             return []
@@ -152,16 +154,17 @@ class MiniMaxParaphraseModel(AbstractParaphraseModel):
                 base_url="https://api.minimaxi.com/anthropic",
                 api_key=self.api_key,
             )
-            feedback = ""
+            diversity_note = ""
             attempts = max(1, max_retries)
             for attempt in range(1, attempts + 1):
+                combined_feedback = (extra_constraint + "\n" + diversity_note).strip()
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=1024,
                     temperature=1.0,
                     system=self.SYSTEM_PROMPT,
                     messages=[
-                        {"role": "user", "content": self._build_user_prompt(captions, feedback)}
+                        {"role": "user", "content": self._build_user_prompt(captions, combined_feedback)}
                     ],
                 )
                 text_parts = []
@@ -179,7 +182,7 @@ class MiniMaxParaphraseModel(AbstractParaphraseModel):
                 max_sim = self._max_similarity(candidate, neighbor_texts)
                 if max_sim < diversity_threshold:
                     return parsed
-                feedback = (
+                diversity_note = (
                     f"Your previous output was too similar to nearby captions "
                     f"(max similarity {max_sim:.2f}, required < {diversity_threshold:.2f}). "
                     "Rewrite with clearly different wording while preserving meaning."
@@ -241,6 +244,7 @@ class OpenAICompatParaphraseModel(AbstractParaphraseModel):
         neighbor_texts: Optional[List[str]] = None,
         diversity_threshold: float = 0.85,
         max_retries: int = 3,
+        extra_constraint: str = "",
     ) -> List[str]:
         if not captions:
             return []
@@ -262,15 +266,16 @@ class OpenAICompatParaphraseModel(AbstractParaphraseModel):
                 api_key=self.api_key,
                 timeout=self.timeout,
             )
-            feedback = ""
+            diversity_note = ""
             attempts = max(1, max_retries)
             for attempt in range(1, attempts + 1):
+                combined_feedback = (extra_constraint + "\n" + diversity_note).strip()
                 response = client.messages.create(
                     model=self.model,
                     max_tokens=1024,
                     temperature=1.0,
                     system=self.SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": self._build_user_prompt(captions, feedback)}],
+                    messages=[{"role": "user", "content": self._build_user_prompt(captions, combined_feedback)}],
                 )
 
                 content = self._collect_text_blocks(response.content)
@@ -284,7 +289,7 @@ class OpenAICompatParaphraseModel(AbstractParaphraseModel):
                 max_sim = self._max_similarity(candidate, neighbor_texts)
                 if max_sim < diversity_threshold:
                     return parsed
-                feedback = (
+                diversity_note = (
                     f"Your previous output was too similar to nearby captions "
                     f"(max similarity {max_sim:.2f}, required < {diversity_threshold:.2f}). "
                     "Rewrite with clearly different wording while preserving meaning."

@@ -9,7 +9,8 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QSplitter, QVBoxLayout,
                               QFileDialog, QMessageBox, QShortcut, QLabel,
                               QDockWidget, QMenuBar, QMenu, QLineEdit,
                               QDialog, QGridLayout, QDialogButtonBox,
-                              QButtonGroup, QRadioButton, QProgressBar)
+                              QButtonGroup, QRadioButton, QProgressBar,
+                              QTableWidget, QTableWidgetItem, QPushButton)
 
 from core.config_manager     import ConfigManager
 from core.sequence_loader    import SequenceLoader, SequenceInfo
@@ -193,6 +194,7 @@ class MainWindow(QMainWindow):
         sc("Ctrl+Y", self._redo)
         sc("Ctrl+H", self.text_panel.focus_search)
         sc("Ctrl+F", self._flag_as_hallucination)
+        sc("Ctrl+D", self._flag_as_attribute_error)
         sc("F",      self._flag_current_frame)
         sc("[",      self._prev_flag)
         sc("]",      self._next_flag)
@@ -223,6 +225,13 @@ class MainWindow(QMainWindow):
         paraphrase_action = QAction("paraphrase 设置…", self)
         paraphrase_action.triggered.connect(self._show_paraphrase_config_dialog)
         config_menu.addAction(paraphrase_action)
+
+        # ── 工具 ───────────────────────────────────────────────────────
+        tools_menu = mb.addMenu("工具")
+
+        attr_action = QAction("目标属性配置…", self)
+        attr_action.triggered.connect(self._show_attribute_config_dialog)
+        tools_menu.addAction(attr_action)
 
         # ── 帮助 ───────────────────────────────────────────────────────
         help_menu = mb.addMenu("帮助")
@@ -537,12 +546,13 @@ class MainWindow(QMainWindow):
     def _get_bulk_rewrite_indices(self) -> List[int]:
         """
         批量改写候选：
-        1) 手动标记为 HALLUCINATION 的帧
+        1) 手动标记为 HALLUCINATION / ATTRIBUTE_ERROR 的帧
         2) 自动违规类型为 DUPLICATE / SIMILAR 的帧
         """
         candidates = set()
         if self.review:
             candidates.update(self.review.get_hallucination_indices())
+            candidates.update(self.review.get_indices_by_type("ATTRIBUTE_ERROR"))
         for idx, viols in self._violations.items():
             if any(v.vtype in ("DUPLICATE", "SIMILAR") for v in viols):
                 candidates.add(idx)
@@ -637,12 +647,26 @@ class MainWindow(QMainWindow):
         self._update_status_bar()
         self._flash_saved("已标记为幻觉")
 
+    def _flag_as_attribute_error(self):
+        """Ctrl+D：直接将当前帧标记为 ATTRIBUTE_ERROR（无弹窗）。"""
+        if not self.review or not self.seq_info:
+            return
+        idx = self._current_frame
+        existing = self.review.get_flag(idx) or {}
+        if existing.get("type") == "ATTRIBUTE_ERROR":
+            return
+        self.review.add_flag(idx, "ATTRIBUTE_ERROR", "")
+        self._refresh_flag_panel()
+        self._update_status_bar()
+        self._flash_saved("已标记为属性错误")
+
     # ═══════════════════════════════════════ batch rewrite (background thread)
     def _on_bulk_rewrite(self, hall_indices: List[int]):
         """执行批量 paraphrase 改写（由 flag_panel 按钮触发），后台运行。"""
         if not self.ann_mgr or not self.seq_info or not hall_indices:
             return
         model_config = self.config.get_paraphrase_model_config()
+        model_config["attribute_properties"] = self.review.get_attribute_properties() if self.review else {}
         if not model_config.get("minimax_api_key") and not model_config.get("openai_api_key"):
             QMessageBox.warning(self, "未配置",
                                "请先在 配置 → paraphrase 设置 中填写 API 密钥。")
@@ -688,6 +712,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "改写出错", error_msg)
         self._flash_saved(f"批量改写完成（{done}/{total} 帧）")
 
+    # ═══════════════════════════════════════ attribute config
+    def _show_attribute_config_dialog(self):
+        if not self.review or not self.seq_info:
+            QMessageBox.warning(self, "未加载序列", "请先加载一个序列后再配置目标属性。")
+            return
+        props = self.review.get_attribute_properties()
+        dlg = _AttributeConfigDialog(props, self)
+        if dlg.exec_() == _AttributeConfigDialog.Accepted:
+            self.review.set_attribute_properties(dlg.get_properties())
+            QMessageBox.information(self, "设置已保存", "目标属性配置已保存（仅对当前序列生效）。")
+
     # ═══════════════════════════════════════ paraphrase config
     def _show_paraphrase_config_dialog(self):
         cfg = self.config.get_paraphrase_model_config()
@@ -710,7 +745,7 @@ class MainWindow(QMainWindow):
             return
         resp = QMessageBox.question(
             self, "批量改写",
-            f"将对 {len(rewrite_indices)} 个候选帧执行 paraphrase 改写（幻觉/重复/相似）。\n"
+            f"将对 {len(rewrite_indices)} 个候选帧执行 paraphrase 改写（幻觉/属性错误/重复/相似）。\n"
             "其中幻觉帧改写后 HALLUCINATION 标记将被移除。\n\n是否继续？",
             QMessageBox.Yes | QMessageBox.No)
         if resp == QMessageBox.Yes:
@@ -740,13 +775,14 @@ class _RewriteThread(QThread):
             return no_target_phrase in text.strip().lower()
 
         def find_ref(idx: int):
+            """查找参考 caption（用于幻觉帧重新生成）。"""
             caps = []
             for candidate in range(idx - 1, -1, -1):
                 if candidate < 0 or candidate >= len(self.ann_lines):
                     break
                 flag = self.review_flags.get(candidate) if self.review_flags else None
                 ftype = flag.get("type") if flag else None
-                if ftype in ("HALLUCINATION", "AI_GENERATED"):
+                if ftype in ("HALLUCINATION", "AI_GENERATED", "ATTRIBUTE_ERROR"):
                     continue
                 caption = self.ann_lines[candidate]
                 if isinstance(caption, str):
@@ -777,6 +813,25 @@ class _RewriteThread(QThread):
                 neighbours.append(caption)
             return neighbours
 
+        def build_attr_fix_constraint(attr_props: dict) -> str:
+            """构建属性修正指令（用于保留句式结构，仅修正错误属性，不补全缺失属性）。"""
+            if not attr_props:
+                return ""
+            lines = [
+                "IMPORTANT: Preserve the original sentence structure and grammar EXACTLY. ",
+                "ONLY replace wrong attribute values with the correct ones from the target properties below. ",
+                "DO NOT add new attributes or content that is not in the original sentence. ",
+                "Paraphrase the corrected attributes using synonyms where appropriate.\n",
+                "Target properties (replace wrong attributes with these correct values):"
+            ]
+            for key, val in attr_props.items():
+                lines.append(f"- {key}: {val}")
+            return "\n".join(lines)
+
+        def is_attribute_error(idx: int) -> bool:
+            flag = self.review_flags.get(idx) if self.review_flags else None
+            return flag.get("type") == "ATTRIBUTE_ERROR" if flag else False
+
         try:
             mt = self.model_config["model_type"]
             if mt == "openai_compat":
@@ -796,36 +851,66 @@ class _RewriteThread(QThread):
         total = len(self.hall_indices)
         done = 0
         errors = []
+        attr_props = self.model_config.get("attribute_properties", {})
 
         for idx in self.hall_indices:
             if 0 <= idx < len(self.ann_lines):
                 if is_no_target_caption(self.ann_lines[idx]):
                     print(f"[批量改写] 帧 {idx} 命中 NO_TARGET 过滤，跳过")
                     continue
-            caps = find_ref(idx)
-            if not caps:
-                print(f"[批量改写] 帧 {idx} 无有效参考文本，跳过")
-                continue
-            neighbour_texts = find_neighbour_texts(idx)
-            results = model.paraphrase(
-                caps,
-                debug_idx=idx,
-                neighbor_texts=neighbour_texts,
-                diversity_threshold=0.85,
-                max_retries=3,
-            )
-            if not results:
-                print(f"[批量改写] 帧 {idx} paraphrase 失败 — 参考: {caps}")
-                errors.append(f"帧 {idx+1} 失败")
-                continue
-            para_text = results[-1]
-            if neighbour_texts:
-                sim = max(
-                    difflib.SequenceMatcher(None, para_text, nb).ratio()
-                    for nb in neighbour_texts
+
+            # 区分处理：属性错误帧 vs 幻觉/重复/相似帧
+            if is_attribute_error(idx):
+                # ATTRIBUTE_ERROR：保留原句式，仅修正属性
+                original_caption = self.ann_lines[idx].strip()
+                if not original_caption:
+                    continue
+                neighbour_texts = find_neighbour_texts(idx)
+                attr_constraint = build_attr_fix_constraint(attr_props)
+
+                results = model.paraphrase(
+                    [original_caption],
+                    debug_idx=idx,
+                    neighbor_texts=neighbour_texts,
+                    diversity_threshold=0.85,
+                    max_retries=3,
+                    extra_constraint=attr_constraint,
                 )
-                print(f"[批量改写] 帧 {idx} 与前5帧最大相似度: {sim:.3f}")
-            print(f"[批量改写] 帧 {idx} 成功 → {para_text}")
+                if not results:
+                    print(f"[批量改写] 帧 {idx} 属性修正失败")
+                    errors.append(f"帧 {idx+1} 属性修正失败")
+                    continue
+                para_text = results[-1]
+                print(f"[批量改写] 帧 {idx} 属性修正成功 → {para_text}")
+            else:
+                # HALLUCINATION/DUPLICATE/SIMILAR：使用参考帧重新生成
+                caps = find_ref(idx)
+                if not caps:
+                    print(f"[批量改写] 帧 {idx} 无有效参考文本，跳过")
+                    continue
+                neighbour_texts = find_neighbour_texts(idx)
+
+                results = model.paraphrase(
+                    caps,
+                    debug_idx=idx,
+                    neighbor_texts=neighbour_texts,
+                    diversity_threshold=0.85,
+                    max_retries=3,
+                    extra_constraint="",
+                )
+                if not results:
+                    print(f"[批量改写] 帧 {idx} paraphrase 失败 — 参考: {caps}")
+                    errors.append(f"帧 {idx+1} 失败")
+                    continue
+                para_text = results[-1]
+                if neighbour_texts:
+                    sim = max(
+                        difflib.SequenceMatcher(None, para_text, nb).ratio()
+                        for nb in neighbour_texts
+                    )
+                    print(f"[批量改写] 帧 {idx} 与前5帧最大相似度: {sim:.3f}")
+                print(f"[批量改写] 帧 {idx} 成功 → {para_text}")
+
             done += 1
             self.progress.emit(done, total, idx, para_text)
 
@@ -892,6 +977,80 @@ class _ParaphraseConfigDialog(QDialog):
         self.openai_api_key = self._le_oa_key.text().strip()
         self.openai_model = self._le_oa_model.text().strip()
         self.accept()
+
+
+class _AttributeConfigDialog(QDialog):
+    """目标属性配置对话框，支持键值对列表编辑。"""
+
+    def __init__(self, props: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("目标属性配置")
+        self.setMinimumWidth(450)
+        self._props = dict(props)
+
+        layout = QVBoxLayout(self)
+
+        # 说明标签
+        lbl = QLabel("配置目标属性（键值对）。在批量改写时，属性信息将被注入 AI prompt 用于修正 ATTRIBUTE_ERROR 帧。\n"
+                     "示例：属性名填 \"clothing\"，属性值填 \"white top and black shorts\"")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color: #808080;")
+        layout.addWidget(lbl)
+
+        # 表格：属性名 | 属性值
+        self._table = QTableWidget(0, 2)
+        self._table.setHorizontalHeaderLabels(["属性名", "属性值"])
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setColumnWidth(0, 150)
+        self._table.setColumnWidth(1, 280)
+        for key, val in self._props.items():
+            self._add_row(key, val)
+
+        layout.addWidget(self._table)
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("添加属性")
+        btn_remove = QPushButton("删除选中")
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_remove)
+        btn_row.addStretch()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btn_row.addWidget(buttons)
+        layout.addLayout(btn_row)
+
+        btn_add.clicked.connect(self._add_row)
+        btn_remove.clicked.connect(self._remove_selected)
+        buttons.accepted.connect(self._on_ok)
+        buttons.rejected.connect(self.reject)
+
+    def _add_row(self, key="", val=""):
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        from PyQt5.QtWidgets import QTableWidgetItem
+        self._table.setItem(row, 0, QTableWidgetItem(key))
+        self._table.setItem(row, 1, QTableWidgetItem(val))
+
+    def _remove_selected(self):
+        for row in sorted(self._table.selectionModel().selectedRows(), reverse=True):
+            self._table.removeRow(row.row())
+
+    def _on_ok(self):
+        self._props.clear()
+        for row in range(self._table.rowCount()):
+            key_item = self._table.item(row, 0)
+            val_item = self._table.item(row, 1)
+            if key_item and val_item:
+                key = key_item.text().strip()
+                val = val_item.text().strip()
+                if key:
+                    self._props[key] = val
+        self.accept()
+
+    def get_properties(self) -> dict:
+        return dict(self._props)
 
 
 class _SDKConfigDialog(QDialog):

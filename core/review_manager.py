@@ -4,7 +4,7 @@ from datetime import date
 from typing import Optional, Dict, Any, List
 
 
-FLAG_TYPES = ["HALLUCINATION", "GRAMMAR", "VISUAL", "OTHER", "MODIFIED", "AI_GENERATED"]
+FLAG_TYPES = ["HALLUCINATION", "GRAMMAR", "VISUAL", "OTHER", "MODIFIED", "AI_GENERATED", "ATTRIBUTE_ERROR"]
 STATUS_PENDING = "pending"
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_DONE = "done"
@@ -18,6 +18,7 @@ class ReviewManager:
         self._progress: Dict[str, Any] = self._load_json(self._progress_path)
         self._seq_name: Optional[str] = None
         self._flags: Dict[str, Any] = {}   # frame_idx(str) -> {type, note}
+        self._attr_props: Dict[str, str] = {}  # 属性键值对（按序列存储）
         self._flags_path: Optional[Path] = None
 
     # ------------------------------------------------------------------ sequence
@@ -26,6 +27,7 @@ class ReviewManager:
         self._flags_path = self._review_dir / f"{seq_name}_flags.json"
         raw = self._load_json(self._flags_path)
         self._flags = raw.get("flagged_frames", {})
+        self._attr_props = raw.get("attribute_properties", {})
 
     # ------------------------------------------------------------------ flags
     def add_flag(self, frame_idx: int, flag_type: str, note: str = ""):
@@ -55,6 +57,23 @@ class ReviewManager:
             if v.get("type") == "HALLUCINATION"
         ])
 
+    def get_indices_by_type(self, ftype: str) -> List[int]:
+        """返回所有被标记为指定类型的帧号（按帧号升序）。"""
+        return sorted([
+            int(k) for k, v in self._flags.items()
+            if v.get("type") == ftype
+        ])
+
+    # ------------------------------------------------------------------ attribute properties
+    def get_attribute_properties(self) -> Dict[str, str]:
+        """返回当前序列的属性键值对。"""
+        return dict(self._attr_props)
+
+    def set_attribute_properties(self, props: Dict[str, str]):
+        """设置当前序列的属性键值对并保存。"""
+        self._attr_props = dict(props)
+        self._save_flags()
+
     # ------------------------------------------------------------------ progress
     def get_progress(self, seq_name: str) -> Dict:
         return self._progress.get(seq_name, {})
@@ -77,7 +96,10 @@ class ReviewManager:
     # ------------------------------------------------------------------ helpers
     def _save_flags(self):
         if self._flags_path:
-            self._save_json(self._flags_path, {"flagged_frames": self._flags})
+            self._save_json(self._flags_path, {
+                "flagged_frames": self._flags,
+                "attribute_properties": self._attr_props,
+            })
 
     @staticmethod
     def _load_json(path: Path) -> Dict:

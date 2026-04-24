@@ -15,6 +15,7 @@ _TYPE_COLORS = {
     "OTHER":         QColor(120, 120, 120),
     "MODIFIED":      QColor( 50, 180,  80),
     "AI_GENERATED":  QColor( 80, 200, 180),
+    "ATTRIBUTE_ERROR": QColor(255, 152,  0),
     # auto-detected
     "OVER_LIMIT":    QColor(220, 50,  50),
     "OVER_WARN":     QColor(210, 130, 30),
@@ -31,6 +32,7 @@ _MANUAL_LABELS = {
     "OTHER":         "其他",
     "MODIFIED":      "已修改",
     "AI_GENERATED":  "AI改写",
+    "ATTRIBUTE_ERROR": "属性错误",
 }
 
 _AUTO_LABELS = {
@@ -99,15 +101,17 @@ class FlagPanel(QWidget):
         # 第二行：手动标记类型 - 后半
         filter_row2 = QHBoxLayout()
         filter_row2.setContentsMargins(0, 1, 0, 1)
-        self._cb_modified = QCheckBox("已修改")
-        self._cb_ai       = QCheckBox("AI改写")
-        self._cb_errors   = QCheckBox("错误")
-        self._cb_warnings = QCheckBox("警告")
-        for cb in (self._cb_modified, self._cb_ai, self._cb_errors, self._cb_warnings):
+        self._cb_modified      = QCheckBox("已修改")
+        self._cb_ai            = QCheckBox("AI改写")
+        self._cb_attr_err      = QCheckBox("属性错误")
+        self._cb_errors        = QCheckBox("错误")
+        self._cb_warnings      = QCheckBox("警告")
+        for cb in (self._cb_modified, self._cb_ai, self._cb_attr_err, self._cb_errors, self._cb_warnings):
             cb.setStyleSheet("font-size: 11px;")
             cb.stateChanged.connect(self._on_filter_changed)
         filter_row2.addWidget(self._cb_modified)
         filter_row2.addWidget(self._cb_ai)
+        filter_row2.addWidget(self._cb_attr_err)
         filter_row2.addSpacing(8)
         filter_row2.addWidget(self._cb_errors)
         filter_row2.addWidget(self._cb_warnings)
@@ -188,6 +192,7 @@ class FlagPanel(QWidget):
         "OTHER":        "_cb_other",
         "MODIFIED":     "_cb_modified",
         "AI_GENERATED": "_cb_ai",
+        "ATTRIBUTE_ERROR": "_cb_attr_err",
         "DUPLICATE":    "_cb_duplicate",
         "SIMILAR":      "_cb_similar",
         "NO_TARGET":    "_cb_no_target",
