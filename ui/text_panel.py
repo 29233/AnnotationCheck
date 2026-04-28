@@ -12,7 +12,7 @@ from PyQt5.QtGui import QColor, QFont, QBrush, QTextBlockFormat, QTextCursor
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                               QTableWidget, QTableWidgetItem, QLabel,
                               QTextEdit, QPushButton, QHeaderView,
-                              QAbstractItemView, QLineEdit)
+                              QAbstractItemView, QLineEdit, QComboBox)
 
 # violation-type → base colour
 _VIOL_COLORS: Dict[str, QColor] = {
@@ -88,6 +88,8 @@ class TextPanel(QWidget):
 
         # in-memory cache backed by ann_mgr.translations (frame_idx → text)
         self._trans_cache: Dict[int, str] = {}
+        # cache source mode (frame_idx → "general"/"professional")
+        self._trans_cache_mode: Dict[int, str] = {}
         # frames currently being translated (avoid duplicate requests)
         self._trans_pending: set = set()
 
@@ -103,6 +105,7 @@ class TextPanel(QWidget):
         # populate in-memory cache from disk store
         if ann_mgr is not None:
             self._trans_cache = dict(ann_mgr.translations)
+            self._trans_cache_mode = {idx: "general" for idx in self._trans_cache.keys()}
 
     # ═══════════════════════════════════════════════════ UI construction
     def _build_ui(self):
@@ -149,6 +152,12 @@ class TextPanel(QWidget):
         self._btn_cancel.setFixedWidth(70)
 
         # ── translate button ─────────────────────────────────────────────
+        self._cmb_translate_mode = QComboBox()
+        self._cmb_translate_mode.addItem("通用版", "general")
+        self._cmb_translate_mode.addItem("专业版", "professional")
+        self._cmb_translate_mode.setFixedHeight(22)
+        self._cmb_translate_mode.setFixedWidth(86)
+        self._cmb_translate_mode.setToolTip("选择阿里云翻译 API：通用版 / 专业版")
         self._btn_translate = QPushButton("翻译")
         self._btn_translate.setFixedHeight(22)
         self._btn_translate.setFixedWidth(50)
@@ -158,6 +167,7 @@ class TextPanel(QWidget):
 
         ctrl_row.addWidget(self._lbl_wc)
         ctrl_row.addStretch()
+        ctrl_row.addWidget(self._cmb_translate_mode)
         ctrl_row.addWidget(self._btn_translate)
         ctrl_row.addWidget(self._lbl_trans_status)
         ctrl_row.addSpacing(8)
@@ -216,6 +226,7 @@ class TextPanel(QWidget):
         self._btn_prev_frame.clicked.connect(self._goto_prev)
         self._btn_next_frame.clicked.connect(self._goto_next)
         self._btn_translate.clicked.connect(self._translate_current)
+        self._cmb_translate_mode.currentIndexChanged.connect(self._on_translate_mode_changed)
         self._preview.textChanged.connect(self._on_preview_changed)
 
         self.table.cellClicked.connect(self._on_cell_clicked)
@@ -238,8 +249,10 @@ class TextPanel(QWidget):
         # re-populate cache from disk store (ann_mgr.translations already loaded)
         if self._ann_mgr is not None:
             self._trans_cache = dict(self._ann_mgr.translations)
+            self._trans_cache_mode = {idx: "general" for idx in self._trans_cache.keys()}
         else:
             self._trans_cache.clear()
+            self._trans_cache_mode.clear()
         self._trans_pending.clear()
         self._rebuild_table()
         self._update_preview(0)
@@ -267,8 +280,10 @@ class TextPanel(QWidget):
         self._violations = violations
         if self._ann_mgr is not None:
             self._trans_cache = dict(self._ann_mgr.translations)
+            self._trans_cache_mode = {idx: "general" for idx in self._trans_cache.keys()}
         else:
             self._trans_cache.clear()
+            self._trans_cache_mode.clear()
         self._rebuild_table()
         self._update_preview(self._current_frame)
 
@@ -430,8 +445,9 @@ class TextPanel(QWidget):
         else:
             self._lbl_wc.setStyleSheet("color: #a0a0a0;")
 
-        # show cached translation if available
-        if idx in self._trans_cache:
+        mode = self._current_translate_mode()
+        # show cached translation if available and mode matches
+        if idx in self._trans_cache and self._trans_cache_mode.get(idx, "general") == mode:
             self._trans_pane.setPlainText(self._trans_cache[idx])
             self._set_text_line_spacing(self._trans_pane, line_height=1.35)
             self._trans_pane.setStyleSheet(_READONLY_STYLE(border_color))
@@ -482,13 +498,28 @@ class TextPanel(QWidget):
         sk = os.environ.get("ALIYUN_ACCESS_KEY_SECRET", "").strip()
         return ak, sk
 
-    def _translate_async(self, idx: int, src_lang: str, tgt_lang: str, text: str):
+    def _current_translate_mode(self) -> str:
+        mode = self._cmb_translate_mode.currentData()
+        if mode not in ("general", "professional"):
+            return "general"
+        return mode
+
+    def _on_translate_mode_changed(self, _index: int):
+        """切换翻译模式后刷新当前显示并按新模式发起翻译。"""
+        if self._current_frame >= 0:
+            self._update_preview(self._current_frame)
+            self._schedule_translate(self._current_frame)
+
+    def _translate_async(self, idx: int, src_lang: str, tgt_lang: str, text: str, mode: str):
         """
         Translate `text` (already detected as src_lang) from src_lang→tgt_lang
         in a background thread. On success stores result in both _trans_cache
         and ann_mgr, then updates UI via _on_translate_done.
         """
-        if idx in self._trans_cache or idx in self._trans_pending:
+        if idx in self._trans_cache and self._trans_cache_mode.get(idx, "general") == mode:
+            return
+        pending_key = (idx, mode)
+        if pending_key in self._trans_pending:
             return
         if not text.strip():
             return
@@ -498,12 +529,12 @@ class TextPanel(QWidget):
             QTimer.singleShot(0, lambda: self._on_translate_error(idx, "未配置 AK/SK"))
             return
 
-        self._trans_pending.add(idx)
+        self._trans_pending.add(pending_key)
 
         def worker():
             try:
                 from alibabacloud_alimt20181012.client import Client
-                from alibabacloud_alimt20181012.models import TranslateGeneralRequest
+                from alibabacloud_alimt20181012.models import TranslateGeneralRequest, TranslateECommerceRequest
                 from alibabacloud_tea_openapi.utils_models import Config
 
                 config = Config(
@@ -513,14 +544,24 @@ class TextPanel(QWidget):
                     endpoint="mt.cn-hangzhou.aliyuncs.com",
                 )
                 client = Client(config)
-                request = TranslateGeneralRequest(
-                    source_text=text,
-                    source_language=src_lang,
-                    target_language=tgt_lang,
-                    format_type="text",
-                    scene="general",
-                )
-                resp = client.translate_general(request)
+                if mode == "professional":
+                    request = TranslateECommerceRequest(
+                        source_text=text,
+                        source_language=src_lang,
+                        target_language=tgt_lang,
+                        format_type="text",
+                        scene="title",
+                    )
+                    resp = client.translate_ecommerce(request)
+                else:
+                    request = TranslateGeneralRequest(
+                        source_text=text,
+                        source_language=src_lang,
+                        target_language=tgt_lang,
+                        format_type="text",
+                        scene="general",
+                    )
+                    resp = client.translate_general(request)
                 body = resp.body
                 data = getattr(body, "data", None)
                 if data is None:
@@ -531,6 +572,7 @@ class TextPanel(QWidget):
 
                 # store in both caches
                 self._trans_cache[idx] = translated
+                self._trans_cache_mode[idx] = mode
                 if self._ann_mgr is not None:
                     self._ann_mgr.set_translation(idx, translated)
                     self._ann_mgr.save_translations()
@@ -539,7 +581,7 @@ class TextPanel(QWidget):
             except Exception as e:
                 QTimer.singleShot(0, lambda: self._on_translate_error(idx, str(e)))
             finally:
-                self._trans_pending.discard(idx)
+                self._trans_pending.discard(pending_key)
 
         t = threading.Thread(target=worker, daemon=True)
         t.start()
@@ -594,13 +636,15 @@ class TextPanel(QWidget):
 
         # invalidate cache for this frame
         self._trans_cache.pop(idx, None)
-        self._trans_pending.discard(idx)
+        self._trans_cache_mode.pop(idx, None)
+        mode = self._current_translate_mode()
+        self._trans_pending.discard((idx, mode))
         self._lbl_trans_status.setText("<font color='#a0a0a0'>翻译中…</font>")
         self._btn_translate.setEnabled(False)
 
         src = _detect_lang(text)
         tgt = "en" if src == "zh" else "zh"
-        self._translate_async(idx, src, tgt, text)
+        self._translate_async(idx, src, tgt, text, mode)
         # safety re-enable after 15s (prevents stuck disabled button on network error)
         QTimer.singleShot(15000, lambda: self._btn_translate.setEnabled(True))
 
@@ -608,7 +652,9 @@ class TextPanel(QWidget):
     def _schedule_translate(self, idx: int):
         """Show cached translation immediately; dispatch async fetch for neighbours."""
         # Show "翻译中…" if no cached result yet
-        if idx not in self._trans_cache:
+        mode = self._current_translate_mode()
+        has_cache = idx in self._trans_cache and self._trans_cache_mode.get(idx, "general") == mode
+        if not has_cache:
             self._trans_pane.setPlainText("")
             self._trans_pane.setStyleSheet(_READONLY_STYLE("#333"))
             self._lbl_trans_status.setText("<font color='#a0a0a0'>翻译中…</font>")
@@ -616,18 +662,22 @@ class TextPanel(QWidget):
             if text.strip():
                 src = _detect_lang(text)
                 tgt = "en" if src == "zh" else "zh"
-                self._translate_async(idx, src, tgt, text.strip())
+                self._translate_async(idx, src, tgt, text.strip(), mode)
 
         # Prefetch ±1/±2/±3 neighbours (only if not already cached)
         for delta in (-3, -2, -1, 1, 2, 3):
             neighbour = idx + delta
             if 0 <= neighbour < self._frame_count:
-                if neighbour not in self._trans_cache and neighbour not in self._trans_pending:
+                neighbour_has_cache = (
+                    neighbour in self._trans_cache
+                    and self._trans_cache_mode.get(neighbour, "general") == mode
+                )
+                if not neighbour_has_cache and (neighbour, mode) not in self._trans_pending:
                     text = self._lines[neighbour] if neighbour < len(self._lines) else ""
                     if text.strip():
                         src = _detect_lang(text)
                         tgt = "en" if src == "zh" else "zh"
-                        self._translate_async(neighbour, src, tgt, text.strip())
+                        self._translate_async(neighbour, src, tgt, text.strip(), mode)
 
     # ── editing ─────────────────────────────────────────────────────
     def _apply_edit(self):

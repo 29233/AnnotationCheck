@@ -1,5 +1,6 @@
 import os
 import difflib
+from time import perf_counter
 from typing import Optional, List
 
 from PyQt5.QtCore import Qt, QTimer, QEvent, pyqtSlot, QThread, pyqtSignal
@@ -253,7 +254,7 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         QMessageBox.about(self, "关于",
-                          "标注审核工具 v1.1\n\n"
+                          "标注审核工具 v1.3\n\n"
                           "双模态（可见光+红外光）图像序列标注审核工具。")
 
     # ── first-launch check ──────────────────────────────────────────
@@ -336,17 +337,25 @@ class MainWindow(QMainWindow):
     def _go_to_frame(self, idx: int):
         if not self.seq_info:
             return
+        nav_t0 = perf_counter()
         idx = max(0, min(idx, self.seq_info.frame_count - 1))
         if idx == self._current_frame:
             return
         # Flush any pending preview edits before navigating
+        t_apply0 = perf_counter()
         self.text_panel.apply_pending_edit()
+        t_apply1 = perf_counter()
         # auto-save before navigation if there are unsaved edits
+        save_cost_ms = 0.0
         if self.ann_mgr and self.ann_mgr.modified:
+            t_save0 = perf_counter()
             self.ann_mgr.save_minimal()
+            t_save1 = perf_counter()
+            save_cost_ms = (t_save1 - t_save0) * 1000
             self._update_status_bar()
         self._current_frame = idx
 
+        t_image0 = perf_counter()
         vis = (self.seq_info.visible_paths[idx]
                if idx < len(self.seq_info.visible_paths) else None)
         inf = (self.seq_info.infrared_paths[idx]
@@ -365,6 +374,14 @@ class MainWindow(QMainWindow):
         self.text_panel.set_current_frame(idx)
         self.nav_bar.set_frame(idx)
         self._update_status_bar()
+        nav_t1 = perf_counter()
+        print(
+            f"[PERF][go_to_frame] target={idx} "
+            f"apply_pending_edit={(t_apply1 - t_apply0) * 1000:.1f}ms "
+            f"save_minimal={save_cost_ms:.1f}ms "
+            f"render_update={(nav_t1 - t_image0) * 1000:.1f}ms "
+            f"total={(nav_t1 - nav_t0) * 1000:.1f}ms"
+        )
 
     def _prev_violation(self):
         if not self._violation_indices:
@@ -396,13 +413,26 @@ class MainWindow(QMainWindow):
     def _on_line_edited(self, idx: int, new_text: str):
         if not self.ann_mgr.lines:
             return
+        edit_t0 = perf_counter()
+        t_set0 = perf_counter()
         self.ann_mgr.set_line(idx, new_text)
+        t_set1 = perf_counter()
         # auto-mark this frame as modified (overwrites any existing flag)
+        t_flag0 = perf_counter()
         if self.review:
             self.review.add_flag(idx, "MODIFIED", "")
-        # revalidate and cache
-        self._violations = self.validator.validate_all(self.ann_mgr.lines)
+        t_flag1 = perf_counter()
+        # incremental revalidate: idx and adjacent frames only
+        t_val0 = perf_counter()
+        range_result = self.validator.validate_range(idx, self.ann_mgr.lines)
+        for changed_idx, viols in range_result.items():
+            if viols:
+                self._violations[changed_idx] = viols
+            else:
+                self._violations.pop(changed_idx, None)
+        t_val1 = perf_counter()
         self._cache_violation_indices(self._violations)
+        t_ui0 = perf_counter()
         self.text_panel.update_violations(self._violations)
         # refresh border for current frame
         frame_viols = self._violations.get(self._current_frame, [])
@@ -415,6 +445,16 @@ class MainWindow(QMainWindow):
         self._refresh_flag_panel()
         self._update_status_bar()
         self._flash_saved("已编辑 — 未保存")
+        t_ui1 = perf_counter()
+        edit_t1 = perf_counter()
+        print(
+            f"[PERF][line_edited] idx={idx} "
+            f"set_line={(t_set1 - t_set0) * 1000:.1f}ms "
+            f"add_flag={(t_flag1 - t_flag0) * 1000:.1f}ms "
+            f"validate_range={(t_val1 - t_val0) * 1000:.1f}ms "
+            f"ui_refresh={(t_ui1 - t_ui0) * 1000:.1f}ms "
+            f"total={(edit_t1 - edit_t0) * 1000:.1f}ms"
+        )
 
     def _undo(self):
         if self.ann_mgr.undo():

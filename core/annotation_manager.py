@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Optional, List, Dict
 
 
@@ -105,11 +106,23 @@ class AnnotationManager:
         """Save without creating a backup — for auto-save on navigation."""
         if not self._text_path:
             return False
+        t0 = perf_counter()
         content = "\n".join(self.lines)
+        content_size = len(content.encode("utf-8"))
         with open(self._text_path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
+        t1 = perf_counter()
         self._modified = False
+        t2 = perf_counter()
         self.save_translations()
+        t3 = perf_counter()
+        print(
+            f"[PERF][save_minimal] lines={len(self.lines)} "
+            f"bytes={content_size} "
+            f"write={(t1 - t0) * 1000:.1f}ms "
+            f"save_translations={(t3 - t2) * 1000:.1f}ms "
+            f"total={(t3 - t0) * 1000:.1f}ms"
+        )
         return True
 
     def _create_backup(self, content: str):
